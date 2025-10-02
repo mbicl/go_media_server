@@ -21,6 +21,7 @@ type serverHandler struct {
 	media       *description.Media
 	format      *format.H264
 	rtpDec      *rtph264.Decoder
+	stream      *gortsplib.ServerStream
 	mpegtsMuxer *mpegtsMuxer
 }
 
@@ -42,8 +43,26 @@ func (sh *serverHandler) OnSessionClose(ctx *gortsplib.ServerHandlerOnSessionClo
 	sh.mutex.Lock()
 	defer sh.mutex.Unlock()
 
+	if sh.stream != nil && ctx.Session == sh.publisher {
+		sh.stream.Close()
+		sh.stream = nil
+	}
+
 	sh.publisher = nil
 	sh.mpegtsMuxer.close()
+}
+
+func (sh *serverHandler) OnDescribe(ctx *gortsplib.ServerHandlerOnDescribeCtx) (*base.Response, *gortsplib.ServerStream, error) {
+	log.Printf("Describe request\n")
+
+	sh.mutex.Lock()
+	defer sh.mutex.Unlock()
+
+	if sh.stream == nil {
+		return &base.Response{StatusCode: base.StatusNotFound}, nil, nil
+	}
+
+	return &base.Response{StatusCode: base.StatusOK}, sh.stream, nil
 }
 
 func (sh *serverHandler) OnAnnounce(ctx *gortsplib.ServerHandlerOnAnnounceCtx) (*base.Response, error) {
@@ -52,7 +71,8 @@ func (sh *serverHandler) OnAnnounce(ctx *gortsplib.ServerHandlerOnAnnounceCtx) (
 	sh.mutex.Lock()
 	defer sh.mutex.Unlock()
 
-	if sh.publisher != nil {
+	if sh.publisher != nil && sh.stream != nil {
+		sh.stream.Close()
 		sh.publisher.Close()
 		sh.mpegtsMuxer.close()
 	}
@@ -85,18 +105,45 @@ func (sh *serverHandler) OnAnnounce(ctx *gortsplib.ServerHandlerOnAnnounceCtx) (
 	sh.format = forma
 	sh.rtpDec = rtpDec
 	sh.mpegtsMuxer = mpegtsMuxer
+	sh.stream = &gortsplib.ServerStream{
+		Server: sh.server,
+		Desc:   ctx.Description,
+	}
+	err = sh.stream.Initialize()
+	if err != nil {
+		panic(err)
+	}
 
 	return &base.Response{StatusCode: base.StatusOK}, nil
 }
 
 func (sh *serverHandler) OnSetup(ctx *gortsplib.ServerHandlerOnSetupCtx) (*base.Response, *gortsplib.ServerStream, error) {
-	if ctx.Session.State() == gortsplib.ServerSessionStateInitial {
-		return &base.Response{StatusCode: base.StatusNotImplemented}, nil, nil
-	}
-
 	log.Printf("Setup request\n")
 
-	return &base.Response{StatusCode: base.StatusOK}, nil, nil
+	if ctx.Session == sh.publisher {
+		if ctx.Session.State() == gortsplib.ServerSessionStateInitial {
+			return &base.Response{StatusCode: base.StatusNotImplemented}, nil, nil
+		}
+		return &base.Response{StatusCode: base.StatusOK}, nil, nil
+	}
+
+	if ctx.Session.State() == gortsplib.ServerSessionStatePreRecord {
+		return &base.Response{StatusCode: base.StatusOK}, nil, nil
+	}
+
+	sh.mutex.Lock()
+	defer sh.mutex.Unlock()
+
+	if sh.stream == nil {
+		return &base.Response{StatusCode: base.StatusNotFound}, nil, nil
+	}
+
+	return &base.Response{StatusCode: base.StatusOK}, sh.stream, nil
+}
+
+func (sh *serverHandler) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.Response, error) {
+	log.Printf("Play request\n")
+	return &base.Response{StatusCode: base.StatusOK}, nil
 }
 
 func (sh *serverHandler) OnRecord(ctx *gortsplib.ServerHandlerOnRecordCtx) (*base.Response, error) {
@@ -114,6 +161,14 @@ func (sh *serverHandler) OnRecord(ctx *gortsplib.ServerHandlerOnRecordCtx) (*bas
 		}
 
 		sh.mpegtsMuxer.writeH264(au, pts)
+		sh.stream.WritePacketRTP(sh.media, pkt)
+	})
+
+	ctx.Session.OnPacketRTPAny(func(medi *description.Media, _ format.Format, pkt *rtp.Packet) {
+		err := sh.stream.WritePacketRTP(medi, pkt)
+		if err != nil {
+			log.Printf("ERROR: %v\n", err)
+		}
 	})
 
 	return &base.Response{StatusCode: base.StatusOK}, nil
