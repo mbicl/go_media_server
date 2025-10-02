@@ -149,8 +149,28 @@ func (sh *serverHandler) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.Re
 func (sh *serverHandler) OnRecord(ctx *gortsplib.ServerHandlerOnRecordCtx) (*base.Response, error) {
 	log.Printf("Record request\n")
 
-	ctx.Session.OnPacketRTP(sh.media, sh.format, func(pkt *rtp.Packet) {
-		pts, ok := ctx.Session.PacketPTS(sh.media, pkt)
+	// ctx.Session.OnPacketRTP(sh.media, sh.format, func(pkt *rtp.Packet) {
+	// 	pts, ok := ctx.Session.PacketPTS(sh.media, pkt)
+	// 	if !ok {
+	// 		return
+	// 	}
+
+	// 	au, err := sh.rtpDec.Decode(pkt)
+	// 	if err != nil {
+	// 		return
+	// 	}
+
+	// 	sh.mpegtsMuxer.writeH264(au, pts)
+	// 	sh.stream.WritePacketRTP(sh.media, pkt)
+	// })
+
+	ctx.Session.OnPacketRTPAny(func(medi *description.Media, _ format.Format, pkt *rtp.Packet) {
+		err := sh.stream.WritePacketRTP(medi, pkt)
+		if err != nil {
+			log.Printf("ERROR: %v\n", err)
+		}
+
+		pts, ok := ctx.Session.PacketPTS(medi, pkt)
 		if !ok {
 			return
 		}
@@ -161,14 +181,6 @@ func (sh *serverHandler) OnRecord(ctx *gortsplib.ServerHandlerOnRecordCtx) (*bas
 		}
 
 		sh.mpegtsMuxer.writeH264(au, pts)
-		sh.stream.WritePacketRTP(sh.media, pkt)
-	})
-
-	ctx.Session.OnPacketRTPAny(func(medi *description.Media, _ format.Format, pkt *rtp.Packet) {
-		err := sh.stream.WritePacketRTP(medi, pkt)
-		if err != nil {
-			log.Printf("ERROR: %v\n", err)
-		}
 	})
 
 	return &base.Response{StatusCode: base.StatusOK}, nil
